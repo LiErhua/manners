@@ -161,8 +161,8 @@ func (s *GracefulServer) Serve(listener net.Listener) error {
 		s.shutdown <- true
 		close(s.shutdown)
 		gracefulHandler.Close()
-		s.Server.SetKeepAlivesEnabled(false)
-		listener.Close()
+		s.Server.SetKeepAlivesEnabled(false)  // 将 Keep alive 关掉
+		listener.Close()   // 在这里先关掉 listener, 不接受外来请求了
 	}()
 
 	originalConnState := s.Server.ConnState
@@ -170,39 +170,46 @@ func (s *GracefulServer) Serve(listener net.Listener) error {
 	// s.ConnState is invoked by the net/http.Server every time a connection
 	// changes state. It keeps track of each connection's state over time,
 	// enabling manners to handle persisted connections correctly.
+	// server 里每次连接状态的变更都会调用一次 s.ConnState, 是用来追踪每一个连接的状态的
+	// s.Connstate 是一个函数，因此我们相当于覆写一下这个函数的实现
+	// ConnState specifies an optional callback function that is
+	// called when a client connection changes state. See the
+	// ConnState type and associated constants for details.
+	// ConnState func(net.Conn, ConnState)
 	s.ConnState = func(conn net.Conn, newState http.ConnState) {
-		s.lcsmu.RLock()
-		protected := s.connections[conn]
+		s.lcsmu.RLock()   // lcsmu 是个读写锁，给这个对象加一个读锁
+		protected := s.connections[conn]   // 给 gracefulServer 加锁，为了防止 s.connections 这个 map 并发读
 		s.lcsmu.RUnlock()
 
 		switch newState {
 
 		case http.StateNew:
-			// New connection -> StateNew
+			// New connection -> StateNew  // 建立的新的连接，这个 hook 函数就会调用，传入的 state 就是 StateNew
 			protected = true
 			s.StartRoutine()
 
 		case http.StateActive:
-			// (StateNew, StateIdle) -> StateActive
-			if gracefulHandler.IsClosed() {
+			// (StateNew, StateIdle) -> StateActive   // 一个连接，StateActive 会从状态 StateNew 或者 StateIdle 变过来
+			if gracefulHandler.IsClosed() {  // 如果 gracefulHandler 状态已经处于关闭状态，那么关闭这个 conn, 不再变为活跃状态
 				conn.Close()
 				break
 			}
 
-			if !protected {
+			if !protected {  // 如果这个连接 protected 是假，需要置为真
 				protected = true
-				s.StartRoutine()
+				s.StartRoutine()   // 先加锁，然后 waitGroup 加一，然后 routinesCount 加一
 			}
 
 		default:
-			// (StateNew, StateActive) -> (StateIdle, StateClosed, StateHiJacked)
-			if protected {
+			// (StateNew, StateActive) -> (StateIdle, StateClosed, StateHiJacked)  // 其他状态的变更时
+			if protected {  // 如果这个 conn 已经被变为 protected 过，那就 waitGroup done 一次，然后 routinesCount 减一
 				s.FinishRoutine()
 				protected = false
 			}
+			// 如果没有被 protected 过，其他状态的变更是不处理的
 		}
 
-		s.lcsmu.Lock()
+		s.lcsmu.Lock()   // 加锁，因为要开始对 s.connections 这个 map 进行修改了，防止并发写导致问题
 		if newState == http.StateClosed || newState == http.StateHijacked {
 			delete(s.connections, conn)
 		} else {
@@ -210,7 +217,7 @@ func (s *GracefulServer) Serve(listener net.Listener) error {
 		}
 		s.lcsmu.Unlock()
 
-		if originalConnState != nil {
+		if originalConnState != nil {  // 如果原始的 ConnState 函数不为空，那么执行一下它
 			originalConnState(conn, newState)
 		}
 	}
@@ -261,9 +268,10 @@ func (s *GracefulServer) RoutinesCount() int {
 
 // gracefulHandler is used by GracefulServer to prevent calling ServeHTTP on
 // to be closed kept-alive connections during the server shutdown.
+// gracefulHandler 目的是为了在服务被关闭的过程中，阻止在 keep-alive 的连接上继续调用 ServeHTTP
 type gracefulHandler struct {
-	closed  int32 // accessed atomically.
-	wrapped http.Handler
+	closed  int32 // accessed atomically.    // 需要被原子操作的，标志被关闭状态的表示
+	wrapped http.Handler                     // 包含的 net/http 的 Handler
 }
 
 func newGracefulHandler(wrapped http.Handler) *gracefulHandler {
@@ -277,7 +285,7 @@ func (gh *gracefulHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		gh.wrapped.ServeHTTP(w, r)
 		return
 	}
-	r.Body.Close()
+	r.Body.Close() // 如果已经是 closed 状态了，这个 connection 也处于被关闭的边缘，因此我们不用具体处理它的逻辑，直接关掉就好了
 	// Server is shutting down at this moment, and the connection that this
 	// handler is being called on is about to be closed. So we do not need to
 	// actually execute the handler logic.

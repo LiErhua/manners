@@ -1,0 +1,5 @@
+
+
+Server.Connstate : StateActive
+StateActive表示一个连接已经读取了1个或更多的 字节的请求。Server.ConnState的钩子 在请求进入处理程序之前，StateActive的钩子就启动了 钩子在请求进入处理程序之前启动，直到请求被处理完才再次启动。处理。在请求被处理后，状态 转变为StateClosed、StateHijacked或StateIdle。
+对于HTTP/2来说，StateActive在从0到1个活动请求的转换过程中会被触发。到一个活动的请求，并且只有在所有的活动请求都完成后才会转为无效。活动请求完成后才会转换。这意味着，ConnState 不能被用来做每个请求的工作；ConnState只注意到 连接的整体状态。
