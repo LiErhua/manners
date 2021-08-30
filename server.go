@@ -189,16 +189,21 @@ func (s *GracefulServer) Serve(listener net.Listener) error {
 			s.StartRoutine()
 
 		case http.StateActive:
+			// 下面两个 if 只能每次走一个，或者两者都不走, 保证了要么 conn 被关掉，要么一个正常的携程 StartRoutine 开始受保护
+
 			// (StateNew, StateIdle) -> StateActive   // 一个连接，StateActive 会从状态 StateNew 或者 StateIdle 变过来
 			if gracefulHandler.IsClosed() {  // 如果 gracefulHandler 状态已经处于关闭状态，那么关闭这个 conn, 不再变为活跃状态
 				conn.Close()
 				break
 			}
+			// 这里有一个 break 用的很好，因为要是这个 connection 活跃了，但是 gracefulHandler 状态已经变成了 closed
+			// 这个时候直接把这个 conn 关掉就可以了，然后直接跳出 Switch，不会走下面的步骤
 
 			if !protected {  // 如果这个连接 protected 是假，需要置为真
 				protected = true
 				s.StartRoutine()   // 先加锁，然后 waitGroup 加一，然后 routinesCount 加一
 			}
+			// ![](https://raw.githubusercontent.com/LiErhua/cloudpic/master/img52021-08-30%20at%206.13%20PM.png)
 
 		default:
 			// (StateNew, StateActive) -> (StateIdle, StateClosed, StateHiJacked)  // 其他状态的变更时
@@ -210,9 +215,10 @@ func (s *GracefulServer) Serve(listener net.Listener) error {
 		}
 
 		s.lcsmu.Lock()   // 加锁，因为要开始对 s.connections 这个 map 进行修改了，防止并发写导致问题
+		// 如果这个 connection 被关闭了或者被劫持了，我们直接把他从我们的 map 里删掉
 		if newState == http.StateClosed || newState == http.StateHijacked {
 			delete(s.connections, conn)
-		} else {
+		} else {  // 如果不是关闭或者劫持，我么就需要把这个的被保护状态赋值给这个 connection
 			s.connections[conn] = protected
 		}
 		s.lcsmu.Unlock()
